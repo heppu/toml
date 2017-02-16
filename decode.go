@@ -51,16 +51,52 @@ func Unmarshal(data []byte, v interface{}) error {
 	return nil
 }
 
+// UnmarshalLoosely parses the TOML data and stores the result in the value pointed to by v.
+//
+// UnmarshalLoosely uses UnmarshalTableLoosely to discard data that isn't present in v.
+//
+// UnmarshalLoosely will mapped to v that according to following rules:
+//
+//	TOML strings to string
+//	TOML integers to any int type
+//	TOML floats to float32 or float64
+//	TOML booleans to bool
+//	TOML datetimes to time.Time
+//	TOML arrays to any type of slice or []interface{}
+//	TOML tables to struct
+//	TOML array of tables to slice of struct
+func UnmarshalLoosely(data []byte, v interface{}) error {
+	table, err := Parse(data)
+	if err != nil {
+		return err
+	}
+	if err := UnmarshalTableLoosely(table, v); err != nil {
+		return fmt.Errorf("toml: unmarshal: %v", err)
+	}
+	return nil
+}
+
 // A Decoder reads and decodes TOML from an input stream.
 type Decoder struct {
-	r io.Reader
+	r      io.Reader
+	strict bool
 }
 
 // NewDecoder returns a new Decoder that reads from r.
 // Note that it reads all from r before parsing it.
 func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{
-		r: r,
+		r:      r,
+		strict: true,
+	}
+}
+
+// NewLooseDecoder returns a new Decoder that reads from r using loose unmarshalling.
+// Note that it reads all from r before parsing it.
+func NewLooseDecoder(r io.Reader) *Decoder {
+	return &Decoder{
+		r:      r,
+		strict: true,
 	}
 }
 
@@ -71,7 +107,10 @@ func (d *Decoder) Decode(v interface{}) error {
 	if err != nil {
 		return err
 	}
-	return Unmarshal(b, v)
+	if d.strict {
+		return Unmarshal(b, v)
+	}
+	return UnmarshalLoosely(b, v)
 }
 
 // Unmarshaler is the interface implemented by objects that can unmarshal a
@@ -95,7 +134,29 @@ type Unmarshaler interface {
 //	TOML arrays to any type of slice or []interface{}
 //	TOML tables to struct
 //	TOML array of tables to slice of struct
-func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
+func UnmarshalTable(t *ast.Table, v interface{}) error {
+	return unmarshalTable(t, true, v)
+}
+
+// UnmarshalTableLoosely applies the contents of an ast.Table to the value pointed at by v.
+//
+// UnmarshalTableLoosely discards data that isn't present in v.
+//
+// UnmarshalTableLoosely will mapped to v that according to following rules:
+//
+//	TOML strings to string
+//	TOML integers to any int type
+//	TOML floats to float32 or float64
+//	TOML booleans to bool
+//	TOML datetimes to time.Time
+//	TOML arrays to any type of slice or []interface{}
+//	TOML tables to struct
+//	TOML array of tables to slice of struct
+func UnmarshalTableLoosely(t *ast.Table, v interface{}) error {
+	return unmarshalTable(t, false, v)
+}
+
+func unmarshalTable(t *ast.Table, strict bool, v interface{}) (err error) {
 	if v == nil {
 		return fmt.Errorf("v must not be nil")
 	}
@@ -114,12 +175,15 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 		case *ast.KeyValue:
 			fv, fieldName, found := findField(rv, key)
 			if !found {
-				return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av.Line, key, v)
+				if strict {
+					return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av.Line, key, v)
+				}
+				break
 			}
 			switch fv.Kind() {
 			case reflect.Map:
 				mv := reflect.New(fv.Type().Elem()).Elem()
-				if err := UnmarshalTable(t, mv.Addr().Interface()); err != nil {
+				if err := unmarshalTable(t, strict, mv.Addr().Interface()); err != nil {
 					return err
 				}
 				fv.SetMapIndex(reflect.ValueOf(fieldName), mv)
@@ -134,7 +198,10 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 		case *ast.Table:
 			fv, fieldName, found := findField(rv, key)
 			if !found {
-				return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av.Line, key, v)
+				if strict {
+					return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av.Line, key, v)
+				}
+				break
 			}
 			if err, ok := setUnmarshaler(fv, string(av.Data)); ok {
 				if err != nil {
@@ -149,7 +216,7 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 			switch fv.Kind() {
 			case reflect.Struct:
 				vv := reflect.New(fv.Type()).Elem()
-				if err := UnmarshalTable(av, vv.Addr().Interface()); err != nil {
+				if err := unmarshalTable(av, strict, vv.Addr().Interface()); err != nil {
 					return err
 				}
 				fv.Set(vv)
@@ -158,7 +225,7 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 				}
 			case reflect.Map:
 				mv := reflect.MakeMap(fv.Type())
-				if err := UnmarshalTable(av, mv.Interface()); err != nil {
+				if err := unmarshalTable(av, strict, mv.Interface()); err != nil {
 					return err
 				}
 				fv.Set(mv)
@@ -168,7 +235,10 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 		case []*ast.Table:
 			fv, fieldName, found := findField(rv, key)
 			if !found {
-				return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av[0].Line, key, v)
+				if strict {
+					return fmt.Errorf("line %d: field corresponding to `%s' is not defined in `%T'", av[0].Line, key, v)
+				}
+				break
 			}
 			data := make([]string, 0, len(av))
 			for _, tbl := range av {
@@ -193,12 +263,12 @@ func UnmarshalTable(t *ast.Table, v interface{}) (err error) {
 				switch t.Kind() {
 				case reflect.Map:
 					vv = reflect.MakeMap(t)
-					if err := UnmarshalTable(tbl, vv.Interface()); err != nil {
+					if err := unmarshalTable(tbl, strict, vv.Interface()); err != nil {
 						return err
 					}
 				default:
 					vv = reflect.New(t).Elem()
-					if err := UnmarshalTable(tbl, vv.Addr().Interface()); err != nil {
+					if err := unmarshalTable(tbl, strict, vv.Addr().Interface()); err != nil {
 						return err
 					}
 				}

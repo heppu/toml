@@ -331,6 +331,57 @@ type Config struct {
 	}
 }
 ```
+### Loose unmarshalling
+
+If the toml file contais data that doesn't appear in struct but you still want to parse the file you can use loose unmarshalling. Let's say we want to parse only the owner from following TOML file:
+
+```toml
+[owner]
+name = "Lance Uppercut"
+dob = 1979-05-27T07:32:00-08:00 # First class dates? Why not?
+
+[database]
+server = "192.168.1.1"
+ports = [ 8001, 8001, 8002 ]
+connection_max = 5000
+enabled = true
+```
+
+```go
+package main
+
+import (
+    "io/ioutil"
+    "os"
+    "time"
+
+    "github.com/naoina/toml"
+)
+
+type tomlConfig struct {
+    Owner struct {
+        Name string
+        Dob  time.Time
+    }
+}
+
+func main() {
+    f, err := os.Open("example.toml")
+    if err != nil {
+        panic(err)
+    }
+    defer f.Close()
+    buf, err := ioutil.ReadAll(f)
+    if err != nil {
+        panic(err)
+    }
+    var config tomlConfig
+    if err := toml.UnmarshalLoosely(buf, &config); err != nil {
+        panic(err)
+    }
+}
+```
+```
 
 ### Using `toml.UnmarshalTOML` interface
 
